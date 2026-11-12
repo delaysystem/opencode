@@ -170,6 +170,59 @@ describe("Ripgrep", () => {
   )
 })
 
+describe("Ripgrep.parseGrepLine", () => {
+  const failWith = (line: string) => Effect.runPromise(Effect.flip(Ripgrep.parseGrepLine(line)))
+
+  test("parses a match line and normalizes its path", async () => {
+    const parsed = await Effect.runPromise(
+      Ripgrep.parseGrepLine(
+        JSON.stringify({
+          type: "match",
+          data: {
+            path: { text: "./src/a.ts" },
+            lines: { text: "hello needle" },
+            line_number: 3,
+            absolute_offset: 20,
+            submatches: [{ match: { text: "needle" }, start: 6, end: 12 }],
+          },
+        }),
+      ),
+    )
+    expect(parsed?.path.text).toBe("src/a.ts")
+    expect(parsed?.line_number).toBe(3)
+    expect(parsed?.absolute_offset).toBe(20)
+    expect(parsed?.lines.text).toBe("hello needle")
+    expect(parsed?.submatches).toEqual([{ match: { text: "needle" }, start: 6, end: 12 }])
+  })
+
+  test("skips non-match lines without validating them", async () => {
+    for (const line of [
+      JSON.stringify({ type: "begin", data: { path: { text: "src/a.ts" } } }),
+      JSON.stringify({ type: "end", data: { path: { text: "src/a.ts" }, stats: {} } }),
+      JSON.stringify({ type: "summary", data: {} }),
+      "42",
+      "null",
+      '"just a string"',
+    ]) {
+      expect(await Effect.runPromise(Ripgrep.parseGrepLine(line))).toBeUndefined()
+    }
+  })
+
+  test("fails with Invalid ripgrep JSON output on malformed lines", async () => {
+    for (const line of ["{not json", '{"type":']) {
+      const error = await failWith(line)
+      expect(error).toBeInstanceOf(Ripgrep.Error)
+      expect(error.message).toBe("Invalid ripgrep JSON output")
+    }
+  })
+
+  test("fails with Invalid ripgrep match output when a match is malformed", async () => {
+    const error = await failWith(JSON.stringify({ type: "match", data: { path: { text: "a.ts" } } }))
+    expect(error).toBeInstanceOf(Ripgrep.Error)
+    expect(error.message).toBe("Invalid ripgrep match output")
+  })
+})
+
 describe("RipgrepBinary.verify", () => {
   const bytes = new TextEncoder().encode("ripgrep archive")
   const hash = new Bun.CryptoHasher("sha256").update(bytes).digest("hex")

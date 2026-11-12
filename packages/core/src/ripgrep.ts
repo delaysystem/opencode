@@ -36,8 +36,6 @@ const RawMatch = Schema.Struct({
     ),
   }),
 })
-const decodeJsonRecord = Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Unknown))
-
 type RawMatchData = (typeof RawMatch.Type)["data"]
 
 export class Error extends Schema.TaggedError<Error>()("Ripgrep.Error", {
@@ -99,6 +97,33 @@ const normalizePath = (value: string) =>
 
 const isInvalidPattern = (stderr: string) =>
   stderr.includes("regex parse error") || stderr.includes("error parsing regex")
+
+// Parses one `--json` grep output line. A single JSON.parse plus a `type`
+// early-out skips full schema validation for begin/end/summary lines while
+// keeping both error branches. Exported for testing.
+export const parseGrepLine = (line: string): Effect.Effect<RawMatchData | undefined, Error> => {
+  let json: unknown
+  try {
+    json = JSON.parse(line)
+  } catch (cause) {
+    return Effect.fail(failure("Invalid ripgrep JSON output", cause))
+  }
+  if (!json || typeof json !== "object" || !("type" in json) || json.type !== "match") return Effect.undefined
+  return Schema.decodeUnknownEffect(RawMatch)(json).pipe(
+    Effect.map((match) => ({
+      ...match.data,
+      lines: {
+        text:
+          match.data.lines.text.length > MAX_LINE_CHARS
+            ? Buffer.from(match.data.lines.text.slice(0, MAX_LINE_CHARS), "utf8").toString() + "..."
+            : match.data.lines.text,
+      },
+      path: { text: normalizePath(match.data.path.text) },
+      submatches: match.data.submatches.slice(0, MAX_SUBMATCHES),
+    })),
+    Effect.mapError((cause) => failure("Invalid ripgrep match output", cause)),
+  )
+}
 
 const layer = Layer.effect(
   Service,
@@ -233,28 +258,7 @@ const layer = Layer.effect(
             input.pattern,
             input.file ?? ".",
           ],
-          parse: (line) =>
-            decodeJsonRecord(line).pipe(
-              Effect.mapError((cause) => failure("Invalid ripgrep JSON output", cause)),
-              Effect.flatMap((json) => {
-                if (!json || typeof json !== "object" || !("type" in json) || json.type !== "match")
-                  return Effect.undefined
-                return Schema.decodeUnknownEffect(RawMatch)(json).pipe(
-                  Effect.map((match) => ({
-                    ...match.data,
-                    lines: {
-                      text:
-                        match.data.lines.text.length > MAX_LINE_CHARS
-                          ? Buffer.from(match.data.lines.text.slice(0, MAX_LINE_CHARS), "utf8").toString() + "..."
-                          : match.data.lines.text,
-                    },
-                    path: { text: normalizePath(match.data.path.text) },
-                    submatches: match.data.submatches.slice(0, MAX_SUBMATCHES),
-                  })),
-                  Effect.mapError((cause) => failure("Invalid ripgrep match output", cause)),
-                )
-              }),
-            ),
+          parse: parseGrepLine,
         }).pipe(
           Effect.map((result) =>
             result.map((match) =>
